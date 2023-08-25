@@ -220,4 +220,31 @@ export default function (Client: any, config: any, components: any) {
       fmt: '/_plugins/_security/api/audit/config',
     },
   });
+
+  /**
+   * Get all roles.
+   */
+  Client.prototype.opensearch_security.prototype.getRoles = ca({
+    url: {
+      fmt: '/_plugins/_security/api/roles',
+    },
+  });
+
+  /**
+   * Get role mappings.
+   */
+  Client.prototype.opensearch_security.prototype.getRoleMapping = ca({
+    url: {
+      fmt: '/_plugins/_security/api/rolesmapping',
+    },
+  });
+
+  /**
+   * Get all tenants.
+   */
+  Client.prototype.opensearch_security.prototype.getTenants = ca({
+    url: {
+      fmt: '/_plugins/_security/api/tenants',
+    },
+  });
 }

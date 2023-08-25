@@ -18,6 +18,11 @@ import { AllHtmlEntities } from 'html-entities';
 import { IRouter, SessionStorageFactory } from '../../../../src/core/server';
 import { SecuritySessionCookie } from '../session/security_cookie';
 import { SecurityClient } from '../backend/opensearch_security_client';
+import {
+  globalTenantName,
+  isPrivateTenant,
+  isGlobalTenant,
+} from '../../common';
 
 export function setupMultitenantRoutes(
   router: IRouter,
@@ -43,7 +48,6 @@ export function setupMultitenantRoutes(
     },
     async (context, request, response) => {
       const tenant = request.body.tenant;
-
       const cookie: SecuritySessionCookie | null = await sessionStroageFactory
         .asScoped(request)
         .get();
@@ -142,6 +146,159 @@ export function setupMultitenantRoutes(
         return response.internalError({
           body: error.message,
         });
+      }
+    }
+  );
+
+  /**
+  * Get tenant permission map.
+  */
+  router.get(
+    {
+      path: `${PREFIX}/multitenancy/permissions/{username}/{tenant}`,
+      validate: {
+        params: schema.object({
+          username: schema.string(),
+          tenant: schema.string(),
+        })
+      },
+    },
+    async (context, request, response) => {
+      try {
+        const user = request.params.username;
+        const tenant = request.params.tenant;
+
+        const multiTenancyInfo = await securityClient.getMultitenancyInfo(request);
+        if (!multiTenancyInfo) {
+          throw new Error('failed to get multi-tenancy info');
+        }
+        if (isPrivateTenant(tenant)) {
+          if (multiTenancyInfo['private_tenant_enabled']) {
+            response.ok({
+              body: {
+                kibana_all_write: {
+                  users: [user],
+                }
+              },
+              headers: {
+                'content-type': 'application/json',
+              },
+            });
+          } else {
+            return response.badRequest({
+              body: 'private tenant of user:' + user + ' is not enabled'
+            });
+          }
+        }
+
+        const getTenantsResponse = await securityClient.getTenantList(request);
+        if (!getTenantsResponse) {
+          return response.badRequest({
+            body: 'failed to get tenant list'
+          });
+        }
+        if (!getTenantsResponse[tenant]) {
+          return response.badRequest({
+            body: 'cannot find tenant:' + tenant
+          });
+        }
+
+        const tenantPermissionMapResponse = await securityClient.getTenantPermissionMap(
+          request,
+          request.params.tenant
+        );
+        return response.ok({
+          body: tenantPermissionMapResponse,
+          headers: {
+            'content-type': 'application/json',
+          },
+        });
+      } catch (error) {
+        return response.internalError({
+          body: error.message,
+        });
+      }
+    }
+  );
+
+  /**
+   * Migrate tenant to worksapce
+   */
+  router.post(
+    {
+      path: `${PREFIX}/multitenancy/migrate2workspace`,
+      validate: {
+        body: schema.object({
+          username: schema.string(),
+          tenant: schema.string(),
+          workspace: schema.string(),
+          includePermissions: schema.boolean(),
+        }),
+      },
+    },
+    async (context, request, response) => {
+      try {
+        let multiTenancyInfo: any;
+        let dashboardsIndex: string | undefined;
+        multiTenancyInfo = await securityClient.getMultitenancyInfo(request);
+        dashboardsIndex = multiTenancyInfo['opensearch_dashboards_index'];
+        if (!dashboardsIndex) {
+          return response.badRequest({
+            body: 'cannot find opensearch dashboards index.',
+          });
+        }
+
+        let tenantInfo: any;
+        let tenantIndex: string | undefined;
+        let requestTenant = request.body.tenant;
+        if (!isGlobalTenant(requestTenant) && requestTenant != globalTenantName) {
+          tenantInfo = await securityClient.getTenantInfoWithInternalUser();
+          tenantIndex = Object.keys(tenantInfo).find((key) => {
+            if (isPrivateTenant(requestTenant)) {
+              return tenantInfo[key] === '__private__' && key.includes(request.body.username);
+            } else {
+              return tenantInfo[key] === requestTenant;
+            }
+          });
+          if (!tenantIndex) {
+            return response.badRequest({
+              body: 'cannot find tenant index.',
+            });
+          }
+        } else {
+          tenantIndex = dashboardsIndex;
+        }
+
+        const getWorkspaceResponse = await securityClient.getWorkspace(request, dashboardsIndex, request.body.workspace);
+        if (!getWorkspaceResponse || !getWorkspaceResponse['found'] || !getWorkspaceResponse['_source']) {
+          return response.badRequest({
+            body: 'cannot find workspace [' + request.body.workspace + ']',
+          });
+        }
+
+        const workspacePermissions = getWorkspaceResponse['_source']['permissions'];
+        if (!workspacePermissions) {
+          throw new Error("failed to get workspace permissions");
+        }
+
+        const migrationResponse = await securityClient.migrateTenant2Workspace(request, request.body.tenant, tenantIndex, dashboardsIndex,
+          request.body.workspace, request.body.includePermissions, workspacePermissions);
+        return response.ok({
+          body: migrationResponse,
+          headers: {
+            'content-type': 'application/json',
+          },
+        });
+      } catch (error: any) {
+        if (error.statusCode && error.statusCode < 500) {
+          return response.badRequest({
+            body: 'migrate tenant to workspace failed, error:' + error.message,
+          });
+        } else {
+          return response.internalError({
+            body: error.message,
+          });
+        }
       }
     }
   );
